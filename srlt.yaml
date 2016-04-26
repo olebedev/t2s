@@ -1,0 +1,27 @@
+base: ./vendor
+dependencies:
+  github.com/blang/vfs:
+    type: git
+    name: github.com/blang/vfs
+    remote: https://github.com/blang/vfs
+    commit: 79f13f3e6ccb8c0a1a709e3c3a48c492a3910453
+  github.com/codegangsta/cli:
+    type: git
+    name: github.com/codegangsta/cli
+    remote: https://github.com/codegangsta/cli
+    commit: 71f57d300dd6a780ac1856c005c4b518cfd498ec
+  github.com/dmulholland/mp3cat:
+    type: git
+    name: github.com/dmulholland/mp3cat
+    remote: https://github.com/dmulholland/mp3cat
+    commit: f8033d6d97d2db241ace44b628aca277f19249d2
+  github.com/gosuri/uilive:
+    type: git
+    name: github.com/gosuri/uilive
+    remote: https://github.com/gosuri/uilive
+    commit: efb88ccd059957c48f24f9d351d33a0eb00ede41
+  github.com/gosuri/uiprogress:
+    type: git
+    name: github.com/gosuri/uiprogress
+    remote: https://github.com/gosuri/uiprogress
+    commit: a9f819bfc744fe70043abcc5a6cd0137a678e3d8
