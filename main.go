@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/blang/vfs/memfs"
 	"github.com/codegangsta/cli"
@@ -20,15 +22,17 @@ import (
 )
 
 const (
-	MAX_CHUNK_LENGTH = 870
-	FILE_TYPE        = "mp3"
-	LANG             = "ru-RU"
-	URL              = "https://tts.voicetech.yandex.net/generate"
+	maxChunkLength = 870
+	fileType       = "mp3"
+	lang           = "ru-RU"
+	targetURL      = "https://tts.voicetech.yandex.net/generate"
 )
 
 func main() {
 	app := cli.NewApp()
 	app.Usage = "преобразование русского текста в звук при помощи Yandex SpeechKit Cloud"
+	app.UsageText = "t2s --key <API access key> [options]"
+	app.ArgsUsage = "- -2 -3"
 	app.Author = "olebedev"
 	app.Email = "ole6edev@gmail.com"
 	app.Version = "0.1.0"
@@ -42,6 +46,16 @@ func main() {
 			Name:  "limit,l",
 			Usage: "лимит на количество одновременных запросов",
 			Value: 100,
+		},
+		cli.IntFlag{
+			Name:  "timeout,t",
+			Usage: "таймаут для http клиента, сек",
+			Value: 120,
+		},
+		cli.IntFlag{
+			Name:  "attempts,a",
+			Usage: "количество попыток запроса конвертации одного чанка",
+			Value: 5,
 		},
 		cli.StringFlag{
 			Name:  "output,o",
@@ -94,6 +108,8 @@ func do(c *cli.Context) {
 		c.String("emotion"),
 		c.Int("limit"),
 		c.String("output") != "",
+		time.Duration(c.Int("timeout"))*time.Second,
+		c.Int("attempts"),
 	)
 	must(err)
 	large, err := concat(files)
@@ -118,7 +134,7 @@ func must(err error) {
 }
 
 func split(s string) ([]string, error) {
-	ret := make([]string, 0)
+	var ret []string
 	splitted := strings.SplitAfter(s, " ")
 	index := 0
 	length := len(splitted)
@@ -129,11 +145,11 @@ Main:
 		if index >= length {
 			break Main
 		}
-		chunk := make([]string, 0)
+		var chunk []string
 	Sub:
 		for ; index < length; index++ {
 			current := splitted[index]
-			if l+len(current) > MAX_CHUNK_LENGTH {
+			if l+len(current) > maxChunkLength {
 				break Sub
 			}
 			chunk = append(chunk, current)
@@ -144,45 +160,60 @@ Main:
 	return ret, nil
 }
 
-func getFiles(splitted []string, key, speaker, emotion string, limit int, showProgress bool) ([][]byte, error) {
+func getFiles(
+	splitted []string,
+	key, speaker, emotion string,
+	limit int, showProgress bool,
+	timeout time.Duration,
+	attempts int,
+) ([][]byte, error) {
 	type resp struct {
 		err   error
 		index int
 		body  []byte
 	}
-
+	client := http.Client{Timeout: timeout}
 	acc := make([][]byte, len(splitted))
 	consume := make(chan *resp)
 	semaphore := make(chan struct{}, limit)
 
 	bar := uiprogress.AddBar(len(splitted)).AppendCompleted().PrependElapsed()
 	if showProgress {
-		// start rendering
 		uiprogress.Start()
 	}
 
 	for i, s := range splitted {
-		go func(index int, s string, c chan *resp) {
+		go func(index int, s string) {
 			semaphore <- struct{}{}
 			params := url.Values{}
 			params.Set("text", s)
-			params.Set("format", FILE_TYPE)
-			params.Set("lang", LANG)
+			params.Set("format", fileType)
+			params.Set("lang", lang)
 			params.Set("speaker", speaker)
 			params.Set("key", key)
 			params.Set("emotion", emotion)
 
-			res, err := http.Get(URL + "?" + params.Encode())
+			var res *http.Response
+			var err error
+			for i := 0; i < attempts; i++ {
+				res, err = client.Get(targetURL + "?" + params.Encode())
+				if err != nil && strings.HasSuffix(err.Error(), "(Client.Timeout exceeded while awaiting headers)") {
+					fmt.Fprintf(os.Stderr, "got timeout error for chunk with index: %d", index)
+				} else {
+					break
+				}
+			}
+
 			bar.Incr()
 			if err != nil {
-				c <- &resp{err: err, index: index}
+				consume <- &resp{err: err, index: index}
 				return
 			}
 			defer res.Body.Close()
 
 			d, err := ioutil.ReadAll(res.Body)
 			if err != nil {
-				c <- &resp{err: err, index: index}
+				consume <- &resp{err: err, index: index}
 				return
 			}
 
@@ -190,15 +221,18 @@ func getFiles(splitted []string, key, speaker, emotion string, limit int, showPr
 				err = errors.New(string(d))
 			}
 
-			c <- &resp{body: d, err: err, index: index}
-		}(i, s, consume)
+			consume <- &resp{body: d, err: err, index: index}
+		}(i, s)
 	}
 
 	for range splitted {
 		r := <-consume
 		<-semaphore
 		if r.err != nil {
-			return acc, r.err
+			fmt.Fprintf(os.Stderr, "http error: %v, text: %s", r.err, splitted[r.index])
+			acc[r.index] = make([]byte, 0)
+			continue
+			// return acc, r.err
 		}
 		acc[r.index] = r.body
 	}
@@ -242,16 +276,16 @@ func concat(files [][]byte) ([]byte, error) {
 				isVBR = true
 			}
 
-			_, err := outputFile.Write(frame.RawBytes)
+			_, err = outputFile.Write(frame.RawBytes)
 			if err != nil {
 				return nil, err
 			}
 
-			totalFrames += 1
+			totalFrames++
 			totalBytes += uint32(len(frame.RawBytes))
 		}
 
-		totalFiles += 1
+		totalFiles++
 	}
 
 	outputFile.Seek(0, os.SEEK_SET)
